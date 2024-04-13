@@ -57,6 +57,29 @@
 #define O_BINARY 0
 #endif
 
+#ifdef _WIN32
+
+#include <windows.h>
+
+#ifndef PATH_MAX
+#ifdef MAXPATHLEN
+#define PATH_MAX        (MAXPATHLEN * 6)
+#else /* not MAXPATHLEN */
+#define PATH_MAX        (1024 * 6)
+#endif /* not MAXPATHLEN */
+#endif /* not PATH_MAX */
+
+static int openw( const char * path, int oflag )
+{
+  WCHAR fname[ PATH_MAX ];
+  if( MultiByteToWideChar( CP_UTF8, 0, path, -1, fname, PATH_MAX ) == 0 )
+    return -1;
+  
+  return _wopen( fname, oflag );
+}
+
+#else
+
 /*
  * The maximum length of path name.
  */
@@ -67,6 +90,11 @@
 #define PATH_MAX        1024
 #endif /* not MAXPATHLEN */
 #endif /* not PATH_MAX */
+
+#define openw open
+
+#endif
+
 
 /*
  * Mutual exclusion lock of Pthreads.
@@ -1970,10 +1998,10 @@ zio_open_raw(Zio *zio, const char *file_name)
 	zio->file = ebnet_open(file_name);
     } else {
 	zio->is_ebnet = 0;
-	zio->file = open(file_name, O_RDONLY | O_BINARY);
+	zio->file = openw(file_name, O_RDONLY | O_BINARY);
     }
 #else
-    zio->file = open(file_name, O_RDONLY | O_BINARY);
+    zio->file = openw(file_name, O_RDONLY | O_BINARY);
 #endif
 
     return zio->file;

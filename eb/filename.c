@@ -41,6 +41,9 @@
 #define strrchr	_mbsrchr
 #endif
 
+#ifdef _WIN32
+#include <windows.h>
+#endif
 
 #ifndef DOS_FILE_PATH
 
@@ -97,6 +100,103 @@ eb_canonicalize_path_name(char *path_name)
  * Original version by KSK Jan/30/1998.
  * Current version by Motoyuki Kasahara.
  */
+
+#ifdef _WIN32
+
+EB_Error_Code
+eb_canonicalize_path_name(char *utf8_path_name)
+{
+    WCHAR path_name[ EB_MAX_PATH_LENGTH + 1 ];
+
+    WCHAR cwd[EB_MAX_PATH_LENGTH + 1];
+    WCHAR temporary_path_name[EB_MAX_PATH_LENGTH + 1];
+    WCHAR *slash;
+    WCHAR *last_backslash;
+
+    MultiByteToWideChar( CP_UTF8, 0, utf8_path_name, -1, path_name, EB_MAX_PATH_LENGTH + 1 );
+
+    /*
+     * Replace `/' with `\\'.
+     */
+    slash = path_name;
+    for (;;) {
+	slash = wcschr(slash, L'/');
+	if (slash == NULL)
+	    break;
+	*slash++ = L'\\';
+    }
+
+    if (*path_name == L'\\' && *(path_name + 1) == L'\\') {
+	/*
+	 * `path_name' is UNC path.  Nothing to be done.
+	 */
+    } else if (ASCII_ISALPHA((char)*path_name) && *(path_name + 1) == L':') {
+	/*
+	 * `path_name' has a drive letter.
+	 * Nothing to be done if it is an absolute path.
+	 */
+	if (*(path_name + 2) != L'\\') {
+	    /*
+	     * `path_name' is a relative path.
+	     * Covert the path name to an absolute path.
+	     */
+	    if (_wgetdcwd(ASCII_TOUPPER((char)*path_name) - 'A' + 1, cwd,
+		EB_MAX_PATH_LENGTH + 1) == NULL) {
+		return EB_ERR_FAIL_GETCWD;
+	    }
+	    if (EB_MAX_PATH_LENGTH < wcslen(cwd) + 1 + wcslen(path_name + 2))
+		return EB_ERR_TOO_LONG_FILE_NAME;
+	    _swprintf(temporary_path_name, L"%s\\%s", cwd, path_name + 2);
+	    wcscpy(path_name, temporary_path_name);
+	}
+    } else if (*path_name == L'\\') {
+	/*
+	 * `path_name' has no drive letter and is an absolute path.
+	 * Add a drive letter to the path name.
+	 */
+	if (_wgetcwd(cwd, EB_MAX_PATH_LENGTH + 1) == NULL)
+	    return EB_ERR_FAIL_GETCWD;
+	cwd[1] = L'\0';
+	if (EB_MAX_PATH_LENGTH < wcslen(cwd) + 1 + wcslen(path_name))
+	    return EB_ERR_TOO_LONG_FILE_NAME;
+	_swprintf(temporary_path_name, L"%s:%s", cwd, path_name);
+	wcscpy(path_name, temporary_path_name);
+
+    } else {
+	/*
+	 * `path_name' has no drive letter and is a relative path.
+	 * Add a drive letter and convert it to an absolute path.
+	 */
+	if (_wgetcwd(cwd, EB_MAX_PATH_LENGTH + 1) == NULL)
+	    return EB_ERR_FAIL_GETCWD;
+
+	if (EB_MAX_PATH_LENGTH < wcslen(cwd) + 1 + wcslen(path_name))
+	    return EB_ERR_TOO_LONG_FILE_NAME;
+	_swprintf(temporary_path_name, L"%s\\%s", cwd, path_name);
+	wcscpy(path_name, temporary_path_name);
+    }
+
+
+    /*
+     * Now `path_name' is `X:\...' or `\\...'.
+     * Unless it is "X:\", eliminate `\' in the tail of the path name.
+     */
+    last_backslash = wcsrchr(path_name, L'\\');
+    if (ASCII_ISALPHA((char)*path_name)) {
+	if (last_backslash != path_name + 2 && *(last_backslash + 1) == L'\0')
+	    *last_backslash = L'\0';
+    } else {
+	if (last_backslash != path_name + 1 && *(last_backslash + 1) == L'\0')
+	    *last_backslash = L'\0';
+    }
+
+    WideCharToMultiByte( CP_UTF8, 0, path_name, -1, utf8_path_name, EB_MAX_PATH_LENGTH + 1, 0, 0 );
+
+    return EB_SUCCESS;
+}
+
+#else
+
 EB_Error_Code
 eb_canonicalize_path_name(char *path_name)
 {
@@ -183,6 +283,8 @@ eb_canonicalize_path_name(char *path_name)
     return EB_SUCCESS;
 }
 
+#endif // _WIN32
+
 #endif /* DOS_FILE_PATH */
 
 
@@ -200,11 +302,23 @@ eb_canonicalize_path_name(char *path_name)
 void
 eb_canonicalize_file_name(char *file_name)
 {
+#ifdef _WIN32
+    WCHAR buf[ EB_MAX_PATH_LENGTH + 1 ];
+    MultiByteToWideChar( CP_UTF8, 0, file_name, -1, buf, EB_MAX_PATH_LENGTH + 1 );
+    _wcsupr( buf );
+    
+    WCHAR *p;
+
+    for (p = buf; *p != '\0' && *p != '.' && *p != ';'; p++);
+    *p = '\0';
+    WideCharToMultiByte( CP_UTF8, 0, buf, -1, file_name, EB_MAX_PATH_LENGTH + 1, 0, 0 );
+#else
     char *p;
 
     for (p = file_name; *p != '\0' && *p != '.' && *p != ';'; p++)
 	*p = ASCII_TOUPPER(*p);
     *p = '\0';
+#endif
 }
 
 
@@ -218,6 +332,56 @@ eb_canonicalize_file_name(char *file_name)
 EB_Error_Code
 eb_fix_directory_name(const char *path, char *directory_name)
 {
+#ifdef _WIN32
+    struct _wdirent *entry;
+    _WDIR *dir;
+    WCHAR wpath[ EB_MAX_PATH_LENGTH + 1 ];
+    WCHAR dir_name[ EB_MAX_PATH_LENGTH + 1 ];
+
+    int size = strlen( directory_name );
+
+    MultiByteToWideChar( CP_UTF8, 0, path, -1, wpath, EB_MAX_PATH_LENGTH + 1 );
+    MultiByteToWideChar( CP_UTF8, 0, directory_name, -1, dir_name, EB_MAX_PATH_LENGTH + 1 );
+
+#ifdef ENABLE_EBNET
+    if (is_ebnet_url(path))
+	return ebnet_fix_directory_name(path, directory_name);
+#endif
+
+    /*
+     * Open the directory `path'.
+     */
+    dir = _wopendir(wpath);
+    if (dir == NULL)
+        goto failed;
+
+    for (;;) {
+        /*
+         * Read the directory entry.
+         */
+        entry = _wreaddir(dir);
+        if (entry == NULL)
+            goto failed;
+
+	if (_wcsicmp(entry->d_name, dir_name) == 0)
+	    break;
+    }
+
+    wcscpy(dir_name, entry->d_name);
+    _wclosedir(dir);
+
+    WideCharToMultiByte( CP_UTF8, 0, dir_name, -1, directory_name, size + 1, 0, 0 );
+
+    return EB_SUCCESS;
+
+    /*
+     * An error occurs...
+     */
+  failed:
+    if (dir != NULL)
+	_wclosedir(dir);
+    return EB_ERR_BAD_DIR_NAME;
+#else
     struct dirent *entry;
     DIR *dir;
 
@@ -256,6 +420,7 @@ eb_fix_directory_name(const char *path, char *directory_name)
     if (dir != NULL)
 	closedir(dir);
     return EB_ERR_BAD_DIR_NAME;
+#endif
 }
 
 
@@ -365,6 +530,111 @@ EB_Error_Code
 eb_find_file_name(const char *path_name, const char *target_file_name,
     char *found_file_name)
 {
+#ifdef _WIN32
+    WCHAR ebz_target_file_name[EB_MAX_FILE_NAME_LENGTH + 1];
+    WCHAR org_target_file_name[EB_MAX_FILE_NAME_LENGTH + 1];
+    WCHAR candidate_file_name[EB_MAX_FILE_NAME_LENGTH + 1];
+    WCHAR target_file_namew[EB_MAX_FILE_NAME_LENGTH + 1];
+    WCHAR wpath_name[EB_MAX_PATH_LENGTH + 1];
+    _WDIR *dir;
+    struct _wdirent *entry;
+    size_t d_namlen;
+    int found = FOUND_NONE;
+
+    MultiByteToWideChar( CP_UTF8, 0, path_name, -1, wpath_name, EB_MAX_PATH_LENGTH + 1 );
+    MultiByteToWideChar( CP_UTF8, 0, target_file_name, -1, target_file_namew, EB_MAX_FILE_NAME_LENGTH + 1 );
+
+#ifdef ENABLE_EBNET
+    if (is_ebnet_url(path_name)) {
+	return ebnet_find_file_name(path_name, target_file_name,
+	    found_file_name);
+    }
+#endif
+
+    MultiByteToWideChar( CP_UTF8, 0, target_file_name, -1, ebz_target_file_name, EB_MAX_FILE_NAME_LENGTH + 1 );
+    wcscat(ebz_target_file_name, L".ebz");
+    MultiByteToWideChar( CP_UTF8, 0, target_file_name, -1, org_target_file_name, EB_MAX_FILE_NAME_LENGTH + 1 );
+    wcscat(org_target_file_name, L".org");
+    candidate_file_name[0] = L'\0';
+
+    /*
+     * Open the directory `path_name'.
+     */
+    dir = _wopendir(wpath_name);
+    if ( dir == NULL )
+	goto failed;
+
+    for (;;) {
+	/*
+	 * Read the directory entry.
+	 */
+	entry = _wreaddir(dir);
+	if (entry == NULL)
+	    break;
+
+	/*
+	 * Compare the given file names and the current entry name.
+	 * We consider they are matched when one of the followings
+	 * is true:
+	 *
+	 *   <target name>          == <entry name>
+	 *   <target name>+";1'     == <entry name>
+	 *   <target name>+"."      == <entry name>
+	 *   <target name>+".;1"    == <entry name>
+	 *   <target name>+".ebz"   == <entry name>
+	 *   <target name>+".ebz;1" == <entry name>
+	 *   <target name>+".org"   == <entry name>
+	 *   <target name>+".org;1" == <entry name>
+	 *
+	 * All the comparisons are done without case sensitivity.
+	 * We support version number ";1" only.
+	 */
+	d_namlen = wcslen(entry->d_name);
+	if (2 < d_namlen
+	    && *(entry->d_name + d_namlen - 2) == L';'
+	    && ASCII_ISDIGIT(*(entry->d_name + d_namlen - 1))) {
+	    d_namlen -= 2;
+	}
+	if (1 < d_namlen && *(entry->d_name + d_namlen - 1) == L'.')
+	    d_namlen--;
+
+	if (_wcsicmp(entry->d_name, ebz_target_file_name) == 0
+	    && *(ebz_target_file_name + d_namlen) == L'\0'
+	    && found < FOUND_EBZ) {
+	    wcscpy(candidate_file_name, entry->d_name);
+	    found = FOUND_EBZ;
+	}
+	if (_wcsnicmp(entry->d_name, target_file_namew, d_namlen) == 0
+	    && *(target_file_name + d_namlen) == L'\0'
+	    && found < FOUND_BASENAME) {
+	    wcscpy(candidate_file_name, entry->d_name);
+	    found = FOUND_BASENAME;
+	}
+	if (_wcsicmp(entry->d_name, org_target_file_name) == 0
+	    && *(org_target_file_name + d_namlen) == L'\0'
+	    && found < FOUND_ORG) {
+	    wcscpy(candidate_file_name, entry->d_name);
+	    found = FOUND_ORG;
+	    break;
+	}
+    }
+
+    if (found == FOUND_NONE)
+	goto failed;
+
+    _wclosedir(dir);
+    WideCharToMultiByte( CP_UTF8, 0, candidate_file_name, -1, found_file_name, EB_MAX_FILE_NAME_LENGTH + 1, 0, 0 );
+
+    return EB_SUCCESS;
+
+    /*
+     * An error occurs...
+     */
+  failed:
+    if (dir != NULL)
+	_wclosedir(dir);
+    return EB_ERR_BAD_FILE_NAME;
+#else
     char ebz_target_file_name[EB_MAX_FILE_NAME_LENGTH + 1];
     char org_target_file_name[EB_MAX_FILE_NAME_LENGTH + 1];
     char candidate_file_name[EB_MAX_FILE_NAME_LENGTH + 1];
@@ -463,6 +733,7 @@ eb_find_file_name(const char *path_name, const char *target_file_name,
     if (dir != NULL)
 	closedir(dir);
     return EB_ERR_BAD_FILE_NAME;
+#endif
 }
 
 
