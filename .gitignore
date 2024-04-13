@@ -1,0 +1,15 @@
+*.o
+*.obj
+
+build/
+release/
+VC2013/libeb/Debug
+VC2013/libeb/Release
+VC2013/libeb/x64
+x64/
+
+# visual studio files
+*.sdf
+*.opensdf
+*.suo
+*.vcxproj.user
